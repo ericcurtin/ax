@@ -57,7 +57,10 @@ func main() {
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "-a" || arg == "--atespace" {
+		if arg == "-h" || arg == "--help" {
+			printUsage()
+			os.Exit(0)
+		} else if arg == "-a" || arg == "--atespace" {
 			if i+1 < len(args) {
 				atespace = args[i+1]
 				i++
@@ -102,7 +105,7 @@ func main() {
 	case "version":
 		fmt.Println("ax version v1alpha1 (standalone redis engine)")
 		return
-	case "help", "-h", "--help":
+	case "help":
 		printUsage()
 		return
 	case "ctx", "context":

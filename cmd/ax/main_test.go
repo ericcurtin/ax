@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -203,6 +204,32 @@ func TestRunGetResourceAliases(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// TestHelpFlagSkipsServer covers regressions like -h/--help being parsed as
+// a subcommand argument (e.g. "ax ssh --help" fetching a task named "--help").
+func TestHelpFlagSkipsServer(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "ax")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building ax: %v\n%s", err, out)
+	}
+
+	for _, args := range [][]string{
+		{"--help"},
+		{"-h"},
+		{"ssh", "--help"},
+		{"ssh", "-h"},
+		{"get", "--help"},
+	} {
+		out, err := exec.Command(bin, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("args %v: %v\n%s", args, err, out)
+		}
+		if !strings.Contains(string(out), "Available Commands") {
+			t.Fatalf("args %v: expected usage output, got %q", args, out)
 		}
 	}
 }
