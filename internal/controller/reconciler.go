@@ -174,7 +174,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, task *v1alpha1.Task, wor
 
 		tmpl, err := r.client.EnsureActorTemplateWithImage(ctx, templateAtespace, templateName, atespace, customTemplateName, task.Spec.Image, extraEnv)
 		if err != nil {
-			slog.Warn("could not create custom ActorTemplate, falling back to default template", "error", err)
+			r.setNotReady(task, "TemplateCreationFailed", err.Error(), now)
+			task.Status.Phase = "Failed"
+			return task, fmt.Errorf("ensuring actor template: %w", err)
 		} else if tmpl != nil && tmpl.Metadata != nil {
 			templateAtespace = tmpl.Metadata.Atespace
 			templateName = tmpl.Metadata.Name

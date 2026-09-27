@@ -33,14 +33,15 @@ import (
 
 type mockControlServer struct {
 	ateapipb.UnimplementedControlServer
-	workerIP         string
-	createdAtespaces []string
-	createdActors    []string
-	resumedActors    []string
-	suspendedActors  []string
-	deletedActors    []string
-	actorTemplates   map[string]bool
-	deletedTemplates []string
+	workerIP          string
+	createdAtespaces  []string
+	createdActors     []string
+	resumedActors     []string
+	suspendedActors   []string
+	deletedActors     []string
+	actorTemplates    map[string]bool
+	deletedTemplates  []string
+	createTemplateErr error
 }
 
 // noSecrets is a SecretResolver for tests: it never finds a key and never touches a cluster.
@@ -57,6 +58,9 @@ func (m *mockControlServer) GetActorTemplate(_ context.Context, req *ateapipb.Ge
 }
 
 func (m *mockControlServer) CreateActorTemplate(_ context.Context, req *ateapipb.CreateActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+	if m.createTemplateErr != nil {
+		return nil, m.createTemplateErr
+	}
 	if m.actorTemplates == nil {
 		m.actorTemplates = make(map[string]bool)
 	}
@@ -268,6 +272,61 @@ func TestTaskReconciler_Suspend(t *testing.T) {
 	}
 	if len(mockSrv.suspendedActors) != 1 || mockSrv.suspendedActors[0] != "suspend-task" {
 		t.Errorf("expected actor 'suspend-task' suspended, got %v", mockSrv.suspendedActors)
+	}
+}
+
+// A custom ActorTemplate that fails to create (for example a tag-referenced
+// image Substrate rejects) must fail the task, not fall back to the default
+// template silently. See #366.
+func TestTaskReconciler_TemplateCreationFailureIsTerminal(t *testing.T) {
+	ctx := context.Background()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer lis.Close()
+
+	mockSrv := &mockControlServer{createTemplateErr: status.Error(codes.InvalidArgument, "must be pinned by digest")}
+	grpcServer := grpc.NewServer()
+	ateapipb.RegisterControlServer(grpcServer, mockSrv)
+	go grpcServer.Serve(lis)
+	defer grpcServer.Stop()
+
+	client, err := substrate.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to create substrate client: %v", err)
+	}
+	defer client.Close()
+
+	reconciler := controller.NewTaskReconciler(client, "test-template", "ax-system")
+	reconciler.SecretResolver = noSecrets
+	reconciler.WorkspaceReadyTimeout = 200 * time.Millisecond
+
+	task := &v1alpha1.Task{
+		ApiVersion: v1alpha1.APIVersion,
+		Kind:       v1alpha1.KindTask,
+		Metadata: &v1alpha1.ObjectMeta{
+			Name:     "tagged-image",
+			Atespace: "default",
+		},
+		Spec: &v1alpha1.TaskSpec{
+			Image: "localhost:5001/my-agent:v1",
+		},
+	}
+
+	reconciled, err := reconciler.Reconcile(ctx, task)
+	if err == nil {
+		t.Fatal("expected Reconcile to return an error")
+	}
+
+	if reconciled.Status.Phase != "Failed" {
+		t.Errorf("expected phase 'Failed', got %q", reconciled.Status.Phase)
+	}
+	assertCondition(t, reconciled, "Ready", "False", "TemplateCreationFailed")
+
+	if len(mockSrv.createdActors) != 0 {
+		t.Errorf("expected no actor to be created, got %v", mockSrv.createdActors)
 	}
 }
 

@@ -13,7 +13,7 @@ metadata:
   name: task123
   atespace: default
 spec:
-  image: "ghcr.io/my-org/my-agent-image"
+  image: "ghcr.io/my-org/my-agent-image"  # must be pinned by digest (@sha256:...) for a custom ActorTemplate; a tag fails the task
   command: ["python", "agent.py"]
   env:
     - name: ENVIRONMENT
