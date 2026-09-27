@@ -18,6 +18,8 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -41,6 +43,9 @@ type mockControlServer struct {
 	deletedActors    []string
 	actorTemplates   map[string]bool
 	deletedTemplates []string
+	// templatePageSize, when set, caps how many templates ListActorTemplates
+	// returns per page, so tests can exercise pagination.
+	templatePageSize int
 }
 
 // noSecrets is a SecretResolver for tests: it never finds a key and never touches a cluster.
@@ -130,11 +135,34 @@ func (m *mockControlServer) DeleteActor(ctx context.Context, req *ateapipb.Delet
 }
 
 func (m *mockControlServer) ListActorTemplates(ctx context.Context, req *ateapipb.ListActorTemplatesRequest) (*ateapipb.ListActorTemplatesResponse, error) {
-	resp := &ateapipb.ListActorTemplatesResponse{}
+	names := make([]string, 0, len(m.actorTemplates))
 	for name := range m.actorTemplates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	start := 0
+	if req.GetPageToken() != "" {
+		n, err := strconv.Atoi(req.GetPageToken())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "invalid page token")
+		}
+		start = n
+	}
+
+	end := len(names)
+	if m.templatePageSize > 0 && start+m.templatePageSize < end {
+		end = start + m.templatePageSize
+	}
+
+	resp := &ateapipb.ListActorTemplatesResponse{}
+	for _, name := range names[start:end] {
 		resp.ActorTemplates = append(resp.ActorTemplates, &ateapipb.ActorTemplate{
 			Metadata: &ateapipb.ResourceMetadata{Name: name, Atespace: req.GetAtespace()},
 		})
+	}
+	if end < len(names) {
+		resp.NextPageToken = strconv.Itoa(end)
 	}
 	return resp, nil
 }
@@ -457,5 +485,51 @@ func TestReconcileDelete_RemovesActorAndTemplates(t *testing.T) {
 		if !mockSrv.actorTemplates[keep] {
 			t.Errorf("template %s should not have been deleted", keep)
 		}
+	}
+}
+
+// TestReconcileDelete_FollowsTemplatePagination guards against a regression
+// where only the first page of ListActorTemplates was read, leaving
+// later-page templates for a deleted task behind in Substrate.
+func TestReconcileDelete_FollowsTemplatePagination(t *testing.T) {
+	ctx := context.Background()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer lis.Close()
+
+	mockSrv := &mockControlServer{
+		actorTemplates: map[string]bool{
+			"default-template":  true, // sorts first, fills page one alone
+			"job-tmpl-0a1b2c3d": true, // sorts second, lands on page two
+		},
+		templatePageSize: 1,
+	}
+	grpcServer := grpc.NewServer()
+	ateapipb.RegisterControlServer(grpcServer, mockSrv)
+	go grpcServer.Serve(lis)
+	defer grpcServer.Stop()
+
+	client, err := substrate.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to create substrate client: %v", err)
+	}
+	defer client.Close()
+
+	reconciler := controller.NewTaskReconciler(client, "test-template", "ax-system")
+	reconciler.SecretResolver = noSecrets
+	reconciler.WorkspaceReadyTimeout = 200 * time.Millisecond
+
+	if err := reconciler.ReconcileDelete(ctx, "default", "job"); err != nil {
+		t.Fatalf("ReconcileDelete failed: %v", err)
+	}
+
+	if mockSrv.actorTemplates["job-tmpl-0a1b2c3d"] {
+		t.Error("second-page template for the deleted task was not removed")
+	}
+	if !mockSrv.actorTemplates["default-template"] {
+		t.Error("unrelated first-page template should not have been deleted")
 	}
 }
