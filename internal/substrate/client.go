@@ -419,10 +419,12 @@ func (c *Client) DeleteActor(ctx context.Context, atespace, actorName string) er
 }
 
 // ListActorTemplates returns every ActorTemplate in the given atespace,
-// following pagination tokens until the server reports no more pages.
+// following pagination tokens until the server reports no more pages. A
+// repeated token is an error rather than an endless loop.
 func (c *Client) ListActorTemplates(ctx context.Context, atespace string) ([]*ateapipb.ActorTemplate, error) {
 	var all []*ateapipb.ActorTemplate
 	pageToken := ""
+	seen := map[string]bool{}
 	for {
 		resp, err := c.control.ListActorTemplates(ctx, &ateapipb.ListActorTemplatesRequest{
 			Atespace:  atespace,
@@ -436,6 +438,10 @@ func (c *Client) ListActorTemplates(ctx context.Context, atespace string) ([]*at
 		if pageToken == "" {
 			return all, nil
 		}
+		if seen[pageToken] {
+			return nil, fmt.Errorf("listing actor templates in %s: repeated page token %q", atespace, pageToken)
+		}
+		seen[pageToken] = true
 	}
 }
 
